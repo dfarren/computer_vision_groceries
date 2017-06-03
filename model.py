@@ -2,6 +2,7 @@ import tensorflow as tf
 import os
 import pdb
 import random
+import matplotlib.pyplot as plt
 
 VGG_MEAN = [123.68, 116.78, 103.94]
 
@@ -34,27 +35,8 @@ def list_images(directory, testing_code=False):
 
     return filenames, labels
 
-def check_accuracy(sess, correct_prediction, keep_prob, dataset_init_op):
-    """
-    Check the accuracy of the model on either train or val (depending on dataset_init_op).
-    """
-    # Initialize the correct dataset
-    sess.run(dataset_init_op)
-    num_correct, num_samples = 0, 0
-    while True:
-        try:
-            correct_pred = sess.run(correct_prediction, {keep_prob: 1})
-            num_correct += correct_pred.sum()
-            num_samples += correct_pred.shape[0]
-        except tf.errors.OutOfRangeError:
-            break
 
-    # Return the fraction of datapoints that were correctly classified
-    acc = float(num_correct) / num_samples
-    return acc
-
-
-def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, decay_rate, validation_percentage=0.3, testing_code=False):
+def get_data(validation_percentage=0.3, testing_code=False):
     # Get the list of filenames and corresponding list of labels for training et validation
     filenames, labels = list_images(data_dir, testing_code)
 
@@ -81,6 +63,94 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
 
     num_classes = len(set(train_labels))
 
+    return train_filenames, train_labels, val_filenames, val_labels, num_classes
+
+
+def check_accuracy(sess, correct_prediction, keep_prob, dataset_init_op):
+    """
+    Check the accuracy of the model on either train or val (depending on dataset_init_op).
+    """
+    # Initialize the correct dataset
+    sess.run(dataset_init_op)
+    num_correct, num_samples = 0, 0
+    while True:
+        try:
+            correct_pred = sess.run(correct_prediction, {keep_prob: 1})
+            num_correct += correct_pred.sum()
+            num_samples += correct_pred.shape[0]
+        except tf.errors.OutOfRangeError:
+            break
+
+    # Return the fraction of datapoints that were correctly classified
+    acc = float(num_correct) / num_samples
+    return acc
+
+
+def calculate_mean_image(sess, train_init_op, sum_image, nbr_samples, keep_prob):
+    sess.run(train_init_op)
+    sum_total, num_samples = 0, 0
+    while True:
+        try:
+            sum_img, nbr_smpls = sess.run([sum_image, nbr_samples], {keep_prob: 1})
+            sum_total += sum_img
+            num_samples += nbr_smpls
+        except tf.errors.OutOfRangeError:
+            break
+
+    mean_image = float(sum_total) / num_samples
+    return mean_image
+
+
+def plot_images(sess, train_init_op, images, labels, keep_prob, labels_pred = None, img_size=224, num_channels=3):
+    sess.run(train_init_op)
+    # run just one epoch
+    img, lbl = sess.run([images, labels], {keep_prob:1})
+
+    #index = random.sample(range(len(img)), k = 9)
+    #img = img[index]
+    #lbl = lbl[index]
+
+    if len(img) == 0:
+        print("no images to show")
+        return
+    else:
+        random_indices = random.sample(range(len(img)), min(len(img), 9))
+
+    img, lbl = zip(*[(img[i], lbl[i]) for i in random_indices])
+
+    # Create figure with 3x3 sub-plots.
+    fig, axes = plt.subplots(3, 3)
+    fig.subplots_adjust(hspace=0.3, wspace=0.3)
+
+    #pdb.set_trace()
+    for i, ax in enumerate(axes.flat):
+        # Plot image.
+        ax.imshow(img[i].reshape(img_size, img_size, num_channels))
+
+        xlabel = "True: {0}".format(lbl[i])
+
+        # Show true and predicted classes.
+        #if labels_pred is None:
+        #    xlabel = "True: {0}".format(lbl[i])
+        #else:
+        #    xlabel = "True: {0}, Pred: {1}".format(lbl[i], labels_pred[i])
+
+        # Show the classes as the label on the x-axis.
+        ax.set_xlabel(xlabel)
+
+        # Remove ticks from the plot.
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Ensure the plot is shown correctly with multiple plots
+    # in a single Notebook cell.
+    plt.show()
+
+
+def create_model(data_dir, num_workers, batch_size, learning_rate, validation_percentage=0.3, testing_code=False):
+
+    train_filenames, train_labels, val_filenames, val_labels, num_classes = get_data(validation_percentage, testing_code)
+
     # --------------------------------------------------------------------------
     # In TensorFlow, you first want to define the computation graph with all the
     # necessary operations: loss, training op, accuracy...
@@ -96,7 +166,7 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         # (2) Resize the image so its smaller side is 256 pixels long
         def _parse_function(filename, label):
             image_string = tf.read_file(filename)
-            image_decoded = tf.image.decode_jpeg(image_string, channels=3)          # (1)
+            image_decoded = tf.image.decode_png(image_string, channels=3)          # (1)
             image = tf.cast(image_decoded, tf.float32)
 
             smallest_side = 256.0
@@ -120,12 +190,13 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         # Note: we don't normalize the data here, as VGG was trained without normalization
         def training_preprocess(image, label):
             crop_image = tf.random_crop(image, [224, 224, 3])                       # (3)
-            flip_image = tf.image.random_flip_left_right(crop_image)                # (4)
+            #flip_image = tf.image.random_flip_left_right(crop_image)                # (4)
 
-            means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
-            centered_image = flip_image - means                                     # (5)
+            #means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
+            #centered_image = flip_image - means                                     # (5)
 
-            return centered_image, label
+            #return centered_image, label
+            return crop_image, label
 
         # Preprocessing (for validation)
         # (3) Take a central 224x224 crop to the scaled image
@@ -138,6 +209,36 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
             centered_image = crop_image - means                                     # (4)
 
             return centered_image, label
+
+
+        '''
+        A convolutional layer produces an output tensor with 4 dimensions. We will add
+        fully-connected layers after the convolution layers, so we need to reduce the 4-dim
+        tensor to 2-dim which can be used as input to the fully-connected layer.
+        '''
+        def flatten_layer(layer):
+            # Get the shape of the input layer.
+            layer_shape = layer.get_shape()
+
+            # The shape of the input layer is assumed to be:
+            # layer_shape == [num_images, img_height, img_width, num_channels]
+
+            # The number of features is: img_height * img_width * num_channels
+            # We can use a function from TensorFlow to calculate this.
+            num_features = layer_shape[1:4].num_elements()
+
+            # Reshape the layer to [num_images, num_features].
+            # Note that we just set the size of the second dimension
+            # to num_features and the size of the first dimension to -1
+            # which means the size in that dimension is calculated
+            # so the total size of the tensor is unchanged from the reshaping.
+            layer_flat = tf.reshape(layer, [-1, num_features])
+
+            # The shape of the flattened layer is now:
+            # [num_images, img_height * img_width * num_channels]
+
+            # Return both the flattened layer and the number of features.
+            return layer_flat, num_features
 
         # ----------------------------------------------------------------------
         # DATASET CREATION using tf.contrib.data.Dataset
@@ -154,10 +255,8 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         train_filenames = tf.constant(train_filenames)
         train_labels = tf.constant(train_labels)
         train_dataset = tf.contrib.data.Dataset.from_tensor_slices((train_filenames, train_labels))
-        train_dataset = train_dataset.map(_parse_function,
-                                          num_threads=num_workers, output_buffer_size=batch_size)
-        train_dataset = train_dataset.map(training_preprocess,
-                                          num_threads=num_workers, output_buffer_size=batch_size)
+        train_dataset = train_dataset.map(_parse_function, num_threads=num_workers, output_buffer_size=batch_size)
+        train_dataset = train_dataset.map(training_preprocess, num_threads=num_workers, output_buffer_size=batch_size)
         train_dataset = train_dataset.shuffle(buffer_size=10000)  # don't forget to shuffle
         batched_train_dataset = train_dataset.batch(batch_size)
 
@@ -165,10 +264,8 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         val_filenames = tf.constant(val_filenames)
         val_labels = tf.constant(val_labels)
         val_dataset = tf.contrib.data.Dataset.from_tensor_slices((val_filenames, val_labels))
-        val_dataset = val_dataset.map(_parse_function,
-            num_threads=num_workers, output_buffer_size=batch_size)
-        val_dataset = val_dataset.map(val_preprocess,
-            num_threads=num_workers, output_buffer_size=batch_size)
+        val_dataset = val_dataset.map(_parse_function, num_threads=num_workers, output_buffer_size=batch_size)
+        val_dataset = val_dataset.map(val_preprocess, num_threads=num_workers, output_buffer_size=batch_size)
         batched_val_dataset = val_dataset.batch(batch_size)
 
 
@@ -192,6 +289,10 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         # Indicates whether we are in training or in test mode
         #is_training = tf.placeholder(tf.bool)
 
+        mean_image = tf.placeholder(tf.float32, shape=[1, 1, 1])
+
+        sum_image = tf.reduce_sum(images, axis=0)
+        nbr_samples = images[0]
 
 
         ##############################
@@ -205,7 +306,6 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
 
         # AlexNet
         regularizers = 0
-        #dropout = 0.85  # Dropout, probability to keep units
         keep_prob = tf.placeholder(tf.float32)  # dropout (keep probability)
 
         ###########################################
@@ -216,8 +316,8 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         bconv1 = tf.get_variable("bconv1", shape=[conv_dep1])
         # Wconv1_summary = tf.summary.image("Wconv1_summary", Wconv1)
         # Spatial Batch Normalization Layer (,F)
-        betabatch1 = tf.get_variable("betabatch1", shape=[conv_dep1])  # 48
-        gammabatch1 = tf.get_variable("gammabatch1", shape=[conv_dep1])  # 48
+        betabatch1 = tf.get_variable("betabatch1", shape=[conv_dep1])
+        gammabatch1 = tf.get_variable("gammabatch1", shape=[conv_dep1])
 
         # GRAPH SETUP
         # Convolutional layer
@@ -243,9 +343,10 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         ############################################
         #           AFFINE layer                   #
         ############################################
-        _, H, W, D = batch1.get_shape().as_list()
-        pool5_flat = tf.reshape(batch1, [-1, H * W * D])
-        W6 = tf.get_variable("W6", shape=[H * W * D, aff_size1])
+        pool5_flat, num_features = flatten_layer(batch1)
+        #_, H_, W_, D = batch1.get_shape()
+        #pool5_flat = tf.reshape(batch1, [-1, H_ * W_ * D])
+        W6 = tf.get_variable("W6", shape=[num_features, aff_size1])
         b6 = tf.get_variable("b6", shape=[aff_size1])
 
         # GRAPH SETUP
@@ -260,6 +361,7 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
         prediction = tf.to_int32(tf.argmax(y_out, 1))
         correct_prediction = tf.equal(prediction, labels)
         accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+        #accuracy = tf.metrics.accuracy(labels, prediction)
         #pdb.set_trace()
         total_loss = tf.losses.softmax_cross_entropy(tf.one_hot(labels, num_classes), logits=y_out)
         mean_loss = tf.reduce_mean(total_loss + regularizers * reg)
@@ -281,7 +383,10 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
     with tf.Session(graph=graph) as sess:
         sess.run(init_op)
 
-        # Update only the last layer for a few epochs.
+        plot_images(sess, train_init_op, images, labels, keep_prob)
+
+        mean_image = calculate_mean_image(sess, train_init_op, sum_image, nbr_samples, keep_prob)
+
         for epoch in range(num_epochs):
             # Run an epoch over the training data.
             print('Starting epoch %d / %d' % (epoch + 1, num_epochs))
@@ -290,8 +395,9 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
             sess.run(train_init_op)
             while True:
                 try:
-                    _, loss = sess.run([train_op, mean_loss], {keep_prob: 0.9})
-                    print(loss)
+                    _, loss, acc = sess.run([train_op, mean_loss, accuracy], {keep_prob: 0.9, mean_image: mean_image})
+                    print('loss: %f' % loss)
+                    print('accuracy: %f' % acc)
                 except tf.errors.OutOfRangeError:
                     break
 
@@ -301,34 +407,7 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, 
             print('Train accuracy: %f' % train_acc)
             print('Val accuracy: %f\n' % val_acc)
 
-    #return correct_prediction, train_op, images, labels, num_classes, train_init_op, val_init_op, graph, is_training, init_op
 
-
-
-def run_model(graph, num_epochs, train_init_op, val_init_op, train_op, is_training, correct_prediction, init_op):
-
-    with tf.Session(graph=graph) as sess:
-        sess.run(init_op)
-
-        # Update only the last layer for a few epochs.
-        for epoch in range(num_epochs):
-            # Run an epoch over the training data.
-            print('Starting epoch %d / %d' % (epoch + 1, num_epochs))
-            # Here we initialize the iterator with the training set.
-            # This means that we can go through an entire epoch until the iterator becomes empty.
-            sess.run(train_init_op)
-            while True:
-                try:
-                    loss = sess.run(train_op, {is_training: True})
-                    print(loss)
-                except tf.errors.OutOfRangeError:
-                    break
-
-            # Check accuracy on the train and val sets every epoch.
-            train_acc = check_accuracy(sess, correct_prediction, is_training, train_init_op)
-            val_acc = check_accuracy(sess, correct_prediction, is_training, val_init_op)
-            print('Train accuracy: %f' % train_acc)
-            print('Val accuracy: %f\n' % val_acc)
 
 
 if __name__ == '__main__':
@@ -347,6 +426,6 @@ if __name__ == '__main__':
     #correct_prediction, train_op, images, labels, num_classes, train_init_op, val_init_op, graph, is_training, init_op = create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, decay_rate, validation_percentage=0.3, testing_code=True)
     #run_model(graph, num_epochs, train_init_op, val_init_op, train_op, is_training, correct_prediction, init_op)
 
-    create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, decay_rate, validation_percentage=0.3, testing_code=True)
+    create_model(data_dir, num_workers, batch_size, learning_rate, validation_percentage=0.3, testing_code=True)
 
     #pdb.set_trace()
