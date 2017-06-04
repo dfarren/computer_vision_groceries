@@ -3,8 +3,12 @@ import os
 import pdb
 import random
 import matplotlib.pyplot as plt
+import numpy as np
 
-VGG_MEAN = [123.68, 116.78, 103.94]
+IMG_MEAN = [0, 0 ,0]
+IMG_SHAPE_ORIGINAL = [256, 256, 3]
+IMG_CROP_RATIO = 0.5
+IMG_SHAPE_FINAL = [int(x*IMG_CROP_RATIO) for x in IMG_SHAPE_ORIGINAL[:-1]] + [IMG_SHAPE_ORIGINAL[-1]]
 
 
 def list_images(directory, testing_code=False):
@@ -36,7 +40,7 @@ def list_images(directory, testing_code=False):
     return filenames, labels
 
 
-def get_data(validation_percentage=0.3, testing_code=False):
+def get_data(data_dir, validation_percentage=0.3, testing_code=False):
     # Get the list of filenames and corresponding list of labels for training et validation
     filenames, labels = list_images(data_dir, testing_code)
 
@@ -66,16 +70,16 @@ def get_data(validation_percentage=0.3, testing_code=False):
     return train_filenames, train_labels, val_filenames, val_labels, num_classes
 
 
-def check_accuracy(sess, correct_prediction, keep_prob, dataset_init_op):
+def check_accuracy(sess, correct_prediction, keep_prob, mean_image_placeholder, mean_image_data, dataset_init_op):
     """
     Check the accuracy of the model on either train or val (depending on dataset_init_op).
     """
     # Initialize the correct dataset
-    sess.run(dataset_init_op)
+    sess.run(dataset_init_op, feed_dict={mean_image_placeholder: mean_image_data})
     num_correct, num_samples = 0, 0
     while True:
         try:
-            correct_pred = sess.run(correct_prediction, {keep_prob: 1})
+            correct_pred = sess.run(correct_prediction, feed_dict={keep_prob: 1, mean_image_placeholder: mean_image_data})
             num_correct += correct_pred.sum()
             num_samples += correct_pred.shape[0]
         except tf.errors.OutOfRangeError:
@@ -86,29 +90,31 @@ def check_accuracy(sess, correct_prediction, keep_prob, dataset_init_op):
     return acc
 
 
-def calculate_mean_image(sess, train_init_op, sum_image, nbr_samples, keep_prob):
-    sess.run(train_init_op)
-    sum_total, num_samples = 0, 0
+def calculate_mean_image(sess, train_init_op, images, keep_prob, mean_image):
+
+    dummy_mean = np.zeros(shape=IMG_SHAPE_FINAL, dtype=np.float32)
+    sess.run(train_init_op, feed_dict={mean_image: dummy_mean})
+    sum_total, num_samples = np.zeros(IMG_SHAPE_FINAL, dtype=np.float32), 0
     while True:
         try:
-            sum_img, nbr_smpls = sess.run([sum_image, nbr_samples], {keep_prob: 1})
-            sum_total += sum_img
-            num_samples += nbr_smpls
+            img = sess.run([images], feed_dict={keep_prob: 1, mean_image: dummy_mean})
+            sum_total += np.sum(img[0], axis=0)
+            num_samples += len(img[0])
         except tf.errors.OutOfRangeError:
             break
 
-    mean_image = float(sum_total) / num_samples
+    mean_image = sum_total / num_samples
     return mean_image
 
 
-def plot_images(sess, train_init_op, images, labels, keep_prob, labels_pred = None, img_size=224, num_channels=3):
-    sess.run(train_init_op)
-    # run just one epoch
-    img, lbl = sess.run([images, labels], {keep_prob:1})
+def plot_images(sess, train_init_op, images, labels, keep_prob, mean_image):
 
-    #index = random.sample(range(len(img)), k = 9)
-    #img = img[index]
-    #lbl = lbl[index]
+    dummy_mean = np.zeros(shape=IMG_SHAPE_FINAL, dtype=np.float32)
+    sess.run(train_init_op, feed_dict={mean_image: dummy_mean})
+    # run just one epoch
+    img, lbl = sess.run([images, labels], {keep_prob: 1})
+    #pdb.set_trace()
+    #img.astype(int)
 
     if len(img) == 0:
         print("no images to show")
@@ -116,16 +122,15 @@ def plot_images(sess, train_init_op, images, labels, keep_prob, labels_pred = No
     else:
         random_indices = random.sample(range(len(img)), min(len(img), 9))
 
-    img, lbl = zip(*[(img[i], lbl[i]) for i in random_indices])
+    img, lbl = zip(*[(img[i].astype(np.uint8), lbl[i]) for i in random_indices])
 
     # Create figure with 3x3 sub-plots.
     fig, axes = plt.subplots(3, 3)
     fig.subplots_adjust(hspace=0.3, wspace=0.3)
 
-    #pdb.set_trace()
     for i, ax in enumerate(axes.flat):
         # Plot image.
-        ax.imshow(img[i].reshape(img_size, img_size, num_channels))
+        ax.imshow(img[i].reshape(IMG_SHAPE_FINAL))
 
         xlabel = "True: {0}".format(lbl[i])
 
@@ -149,7 +154,7 @@ def plot_images(sess, train_init_op, images, labels, keep_prob, labels_pred = No
 
 def create_model(data_dir, num_workers, batch_size, learning_rate, validation_percentage=0.3, testing_code=False):
 
-    train_filenames, train_labels, val_filenames, val_labels, num_classes = get_data(validation_percentage, testing_code)
+    train_filenames, train_labels, val_filenames, val_labels, num_classes = get_data(data_dir, validation_percentage, testing_code)
 
     # --------------------------------------------------------------------------
     # In TensorFlow, you first want to define the computation graph with all the
@@ -157,6 +162,12 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
     # Any tensor created in the `graph.as_default()` scope will be part of `graph`
     graph = tf.Graph()
     with graph.as_default():
+
+        mean_image = tf.placeholder(shape = IMG_SHAPE_FINAL, dtype = tf.float32)
+        keep_prob = tf.placeholder(tf.float32)  # dropout (keep probability)
+
+
+
         # Standard preprocessing for VGG on ImageNet taken from here:
         # https://github.com/tensorflow/models/blob/master/slim/preprocessing/vgg_preprocessing.py
         # Also see the VGG paper for more details: https://arxiv.org/pdf/1409.1556.pdf
@@ -167,21 +178,23 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         def _parse_function(filename, label):
             image_string = tf.read_file(filename)
             image_decoded = tf.image.decode_png(image_string, channels=3)          # (1)
+            image_decoded.set_shape(IMG_SHAPE_ORIGINAL)
             image = tf.cast(image_decoded, tf.float32)
 
-            smallest_side = 256.0
-            height, width = tf.shape(image)[0], tf.shape(image)[1]
-            height = tf.to_float(height)
-            width = tf.to_float(width)
-
-            scale = tf.cond(tf.greater(height, width),
-                            lambda: smallest_side / width,
-                            lambda: smallest_side / height)
-            new_height = tf.to_int32(height * scale)
-            new_width = tf.to_int32(width * scale)
-
-            resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
-            return resized_image, label
+            # smallest_side = 256.0
+            # height, width = tf.shape(image)[0], tf.shape(image)[1]
+            # height = tf.to_float(height)
+            # width = tf.to_float(width)
+            #
+            # scale = tf.cond(tf.greater(height, width),
+            #                 lambda: smallest_side / width,
+            #                 lambda: smallest_side / height)
+            # new_height = tf.to_int32(height * scale)
+            # new_width = tf.to_int32(width * scale)
+            #
+            # resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
+            # return resized_image, label
+            return image, label
 
         # Preprocessing (for training)
         # (3) Take a random 224x224 crop to the scaled image
@@ -189,27 +202,30 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         # (5) Substract the per color mean `VGG_MEAN`
         # Note: we don't normalize the data here, as VGG was trained without normalization
         def training_preprocess(image, label):
-            crop_image = tf.random_crop(image, [224, 224, 3])                       # (3)
+            crop_image = tf.image.central_crop(image, 0.5)
+            #crop_image = tf.random_crop(image, [224, 224, 3])                       # (3)
             #flip_image = tf.image.random_flip_left_right(crop_image)                # (4)
 
-            #means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
+            #means = tf.reshape(tf.constant(mean_image), [1, 1, 3])
             #centered_image = flip_image - means                                     # (5)
-
+            centered_image = crop_image - mean_image
             #return centered_image, label
-            return crop_image, label
+            return centered_image, label
 
         # Preprocessing (for validation)
         # (3) Take a central 224x224 crop to the scaled image
         # (4) Substract the per color mean `VGG_MEAN`
         # Note: we don't normalize the data here, as VGG was trained without normalization
         def val_preprocess(image, label):
-            crop_image = tf.image.resize_image_with_crop_or_pad(image, 224, 224)    # (3)
+            crop_image = tf.image.central_crop(image, 0.5)
+            #crop_image = tf.image.resize_image_with_crop_or_pad(image, 224, 224)    # (3)
 
-            means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
-            centered_image = crop_image - means                                     # (4)
+            #means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
+            centered_image = crop_image - mean_image #  (4)
+            #centered_image = image - mean_image
 
+            #return centered_image, label
             return centered_image, label
-
 
         '''
         A convolutional layer produces an output tensor with 4 dimensions. We will add
@@ -239,6 +255,8 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
 
             # Return both the flattened layer and the number of features.
             return layer_flat, num_features
+
+
 
         # ----------------------------------------------------------------------
         # DATASET CREATION using tf.contrib.data.Dataset
@@ -289,10 +307,8 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         # Indicates whether we are in training or in test mode
         #is_training = tf.placeholder(tf.bool)
 
-        mean_image = tf.placeholder(tf.float32, shape=[1, 1, 1])
-
-        sum_image = tf.reduce_sum(images, axis=0)
-        nbr_samples = images[0]
+        #sum_image = tf.reduce_sum(images, axis=0)
+        #nbr_samples = images.sape[0]
 
 
         ##############################
@@ -304,16 +320,13 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         conv_dep1 = 19
         aff_size1 = 25
 
-        # AlexNet
         regularizers = 0
-        keep_prob = tf.placeholder(tf.float32)  # dropout (keep probability)
-
         ###########################################
         #             CONV1 layer                 #
         ###########################################
         _, H, W, nbr_channels = images.shape
-        Wconv1 = tf.get_variable("Wconv1", shape=[conv_size1, conv_size1, nbr_channels, conv_dep1])
-        bconv1 = tf.get_variable("bconv1", shape=[conv_dep1])
+        Wconv1 = tf.get_variable("Wconv1", shape=[conv_size1, conv_size1, nbr_channels, conv_dep1], initializer=tf.contrib.layers.xavier_initializer_conv2d())
+        bconv1 = tf.get_variable("bconv1", shape=[conv_dep1], initializer=tf.contrib.layers.xavier_initializer_conv2d())
         # Wconv1_summary = tf.summary.image("Wconv1_summary", Wconv1)
         # Spatial Batch Normalization Layer (,F)
         betabatch1 = tf.get_variable("betabatch1", shape=[conv_dep1])
@@ -346,8 +359,8 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         pool5_flat, num_features = flatten_layer(batch1)
         #_, H_, W_, D = batch1.get_shape()
         #pool5_flat = tf.reshape(batch1, [-1, H_ * W_ * D])
-        W6 = tf.get_variable("W6", shape=[num_features, aff_size1])
-        b6 = tf.get_variable("b6", shape=[aff_size1])
+        W6 = tf.get_variable("W6", shape=[num_features, aff_size1], initializer=tf.contrib.layers.xavier_initializer())
+        b6 = tf.get_variable("b6", shape=[aff_size1], initializer=tf.contrib.layers.xavier_initializer())
 
         # GRAPH SETUP
         aff6 = tf.matmul(pool5_flat, W6) + b6
@@ -383,27 +396,25 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
     with tf.Session(graph=graph) as sess:
         sess.run(init_op)
 
-        plot_images(sess, train_init_op, images, labels, keep_prob)
+        plot_images(sess, train_init_op, images, labels, keep_prob, mean_image)
 
-        mean_image = calculate_mean_image(sess, train_init_op, sum_image, nbr_samples, keep_prob)
+        mean_image_value = calculate_mean_image(sess, train_init_op, images, keep_prob, mean_image)
 
         for epoch in range(num_epochs):
             # Run an epoch over the training data.
             print('Starting epoch %d / %d' % (epoch + 1, num_epochs))
             # Here we initialize the iterator with the training set.
             # This means that we can go through an entire epoch until the iterator becomes empty.
-            sess.run(train_init_op)
+            sess.run(train_init_op, {mean_image: mean_image_value})
             while True:
                 try:
-                    _, loss, acc = sess.run([train_op, mean_loss, accuracy], {keep_prob: 0.9, mean_image: mean_image})
-                    print('loss: %f' % loss)
-                    print('accuracy: %f' % acc)
+                    _, loss = sess.run([train_op, mean_loss], {keep_prob: 1, mean_image: mean_image_value})
                 except tf.errors.OutOfRangeError:
                     break
 
             # Check accuracy on the train and val sets every epoch.
-            train_acc = check_accuracy(sess, correct_prediction, keep_prob, train_init_op)
-            val_acc = check_accuracy(sess, correct_prediction, keep_prob, val_init_op)
+            train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, train_init_op) #check if mean_image is ok
+            val_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, val_init_op)
             print('Train accuracy: %f' % train_acc)
             print('Val accuracy: %f\n' % val_acc)
 
