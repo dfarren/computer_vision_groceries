@@ -91,20 +91,20 @@ def check_accuracy(sess, correct_prediction, keep_prob, mean_image_placeholder, 
     return acc
 
 
-def calculate_mean_image(sess, train_init_op, images, keep_prob, mean_image):
+def calculate_mean_image(graph, train_init_op, images, keep_prob, mean_image):
+    with tf.Session(graph=graph) as sess:
+        sess.run(train_init_op, feed_dict={mean_image: IMG_ZERO_MEAN})
+        sum_total, num_samples = np.zeros(IMG_SHAPE_FINAL, dtype=np.float32), 0
+        while True:
+            try:
+                img = sess.run([images], feed_dict={keep_prob: 1, mean_image: IMG_ZERO_MEAN})
+                sum_total += np.sum(img[0], axis=0)
+                num_samples += len(img[0])
+            except tf.errors.OutOfRangeError:
+                break
 
-    sess.run(train_init_op, feed_dict={mean_image: IMG_ZERO_MEAN})
-    sum_total, num_samples = np.zeros(IMG_SHAPE_FINAL, dtype=np.float32), 0
-    while True:
-        try:
-            img = sess.run([images], feed_dict={keep_prob: 1, mean_image: IMG_ZERO_MEAN})
-            sum_total += np.sum(img[0], axis=0)
-            num_samples += len(img[0])
-        except tf.errors.OutOfRangeError:
-            break
-
-    mean_image = sum_total / num_samples
-    return mean_image
+        mean_image = sum_total / num_samples
+        return mean_image
 
 
 def plot_images(sess, train_init_op, images, labels, keep_prob, mean_image):
@@ -500,78 +500,80 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, reg, validati
         return graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver, grad
 
 
-def train(sess, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver):
+def train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver):
     best_accuracy = 0
-    sess.run(init_op)
 
-    plot_images(sess, train_init_op, images, labels, keep_prob, mean_image)
+    with tf.Session(graph=graph) as sess:
+        sess.run(init_op)
 
-    for epoch in range(num_epochs):
-        # Run an epoch over the training data.
-        print('Starting epoch %d / %d' % (epoch + 1, num_epochs))
-        # Here we initialize the iterator with the training set.
-        # This means that we can go through an entire epoch until the iterator becomes empty.
-        sess.run(train_init_op, {mean_image: mean_image_value})
-        while True:
-            try:
-                _, loss = sess.run([train_op, mean_loss], feed_dict={keep_prob: 0.8, mean_image: mean_image_value})
-            except tf.errors.OutOfRangeError:
-                break
+        #plot_images(sess, train_init_op, images, labels, keep_prob, mean_image)
+
+        for epoch in range(num_epochs):
+            # Run an epoch over the training data.
+            print('Starting epoch %d / %d' % (epoch + 1, num_epochs))
+            # Here we initialize the iterator with the training set.
+            # This means that we can go through an entire epoch until the iterator becomes empty.
+            sess.run(train_init_op, {mean_image: mean_image_value})
+            while True:
+                try:
+                    _, loss = sess.run([train_op, mean_loss], feed_dict={keep_prob: 0.5, mean_image: mean_image_value})
+                except tf.errors.OutOfRangeError:
+                    break
+
+            # Check accuracy on the train and val sets every epoch.
+            train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, train_init_op) #check if mean_image is ok
+            val_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, val_init_op)
+            print('Train accuracy: %f' % train_acc)
+            print('Val accuracy: %f\n' % val_acc)
+
+            if val_acc>best_accuracy:
+                saver.save(sess, 'models/model.ckpt', global_step=epoch)
+
+
+def load_model(graph, saver, train_init_op, mean_image, mean_image_value):
+
+    with tf.Session(graph=graph) as sess:
+        ckpt = tf.train.get_checkpoint_state('models')
+        if ckpt and ckpt.model_checkpoint_path:
+            saver.restore(sess, ckpt.model_checkpoint_path)
+            print('Restored!')
+        else:
+            print("No Checkpoint Found")
 
         # Check accuracy on the train and val sets every epoch.
-        train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, train_init_op) #check if mean_image is ok
+        train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value,
+                                   train_init_op)  # check if mean_image is ok
         val_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, val_init_op)
         print('Train accuracy: %f' % train_acc)
         print('Val accuracy: %f\n' % val_acc)
 
-        if val_acc>best_accuracy:
-            saver.save(sess, 'models/model.ckpt', global_step=epoch)
 
-    return sess
+def saliency_map(graph, init_weights, init_iterator, grad, images, labels, keep_prob, mean_image, mean_image_value):
 
-def load_model(sess, saver, train_init_op, mean_image, mean_image_value):
+    with tf.Session(graph=graph) as sess:
+        sess.run(init_weights)
+        sess.run(init_iterator, {mean_image: IMG_ZERO_MEAN})
+        grad_value, images_value, labels_value = sess.run([grad, images, labels], feed_dict={keep_prob: 1, mean_image: IMG_ZERO_MEAN})
+        #grad_value = sess.run([grad], feed_dict={keep_prob: 1, mean_image: mean_image_value})
+        grad_value = np.absolute(grad_value)
 
-    ckpt = tf.train.get_checkpoint_state('models')
-    if ckpt and ckpt.model_checkpoint_path:
-        saver.restore(sess, ckpt.model_checkpoint_path)
-        print('Restored!')
-    else:
-        print("No Checkpoint Found")
+        saliency = np.max(grad_value, axis=3)
 
-    # Check accuracy on the train and val sets every epoch.
-    train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value,
-                               train_init_op)  # check if mean_image is ok
-    val_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, val_init_op)
-    print('Train accuracy: %f' % train_acc)
-    print('Val accuracy: %f\n' % val_acc)
+        mask = random.sample(range(len(grad_value)), k=5)
+        #pdb.set_trace()
 
-    return sess
-
-
-def saliency_map(sess, init, grad, images, labels, keep_prob, mean_image, mean_image_value):
-
-    sess.run(init, {mean_image: IMG_ZERO_MEAN})
-    grad_value, images_value, labels_value = sess.run([grad, images, labels], feed_dict={keep_prob: 1, mean_image: IMG_ZERO_MEAN})
-    #grad_value = sess.run([grad], feed_dict={keep_prob: 1, mean_image: mean_image_value})
-    grad_value = np.absolute(grad_value)
-
-    saliency = np.max(grad_value, axis=3)
-
-    mask = random.sample(range(len(grad_value)), k=5)
-    #pdb.set_trace()
-
-    for i, e in enumerate(mask):
-        plt.subplot(2, len(mask), i + 1)
-        plt.imshow(images_value[e] + IMG_ZERO_MEAN)
-        plt.axis('off')
-        plt.title(labels_value[e])
-        plt.subplot(2, len(mask), len(mask) + i + 1)
-        plt.title(e)
-        plt.imshow(saliency[e], cmap=plt.cm.hot)
-        plt.axis('off')
-        plt.gcf().set_size_inches(10, 4)
-    plt.show()
-    plt.savefig('foo.png')
+        for i, e in enumerate(mask):
+            plt.subplot(2, len(mask), i + 1)
+            plt.imshow(images_value[e] + IMG_ZERO_MEAN)
+            plt.axis('off')
+            plt.title(labels_value[e])
+            plt.subplot(2, len(mask), len(mask) + i + 1)
+            plt.title(e)
+            plt.imshow(saliency[e], cmap=plt.cm.hot)
+            plt.axis('off')
+            plt.gcf().set_size_inches(10, 4)
+        #plt.show()
+        plt.savefig('foo.png')
 
 
 
@@ -583,7 +585,7 @@ if __name__ == '__main__':
     batch_size = 100
 
     # Hyperparameters
-    reg = 0.1  # regularization
+    reg = 0.01  # regularization
     learning_rate = 1e-4  # learning rate
     decay_rate = 0.8  # decay rate
     decay_steps = 10  # decay cut
@@ -593,21 +595,21 @@ if __name__ == '__main__':
     graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver, grad = create_model(
         data_dir, num_workers, batch_size, learning_rate, reg, validation_percentage=0.3, testing_code=True)
 
-    sess = tf.Session(graph=graph)
+    #sess = tf.Session(graph=graph)
 
-    mean_image_value = calculate_mean_image(sess, train_init_op, images, keep_prob, mean_image)
+    mean_image_value = calculate_mean_image(graph, train_init_op, images, keep_prob, mean_image)
 
     load = True
 
     if load:
-        sess = load_model(sess, saver, train_init_op, mean_image, mean_image_value)
-        saliency_map(sess, train_init_op, grad, images, labels, keep_prob, mean_image, mean_image_value)
+        sess = load_model(graph, saver, train_init_op, mean_image, mean_image_value)
+        saliency_map(graph, init_op, train_init_op, grad, images, labels, keep_prob, mean_image, mean_image_value)
 
     else:
         #correct_prediction, train_op, images, labels, num_classes, train_init_op, val_init_op, graph, is_training, init_op = create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, decay_rate, validation_percentage=0.3, testing_code=True)
         #run_model(graph, num_epochs, train_init_op, val_init_op, train_op, is_training, correct_prediction, init_op)
 
-        sess = train(sess, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver)
+        sess = train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver)
         #pdb.set_trace()
 
-    sess.close()
+    #sess.close()
