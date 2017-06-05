@@ -313,12 +313,18 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
 
         ##############################
 
-
-
-
         conv_size1 = 5
+        conv_size2 = 6
+        conv_size3 = 6
+        conv_size4 = 3
+        conv_size5 = 3
         conv_dep1 = 19
-        aff_size1 = 25
+        conv_dep2 = 90
+        conv_dep3 = 144
+        conv_dep4 = 99
+        conv_dep5 = 74
+        aff_size1 = 850
+        aff_size2 = 414
 
         regularizers = 0
         ###########################################
@@ -353,10 +359,82 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         # Add regulerization
         regularizers += tf.nn.l2_loss(Wconv1)
 
+        ###########################################
+        #             CONV2 layer                 #
+        ###########################################
+        _, _, _, conv_shape_param = batch1.shape
+        Wconv2 = tf.get_variable("Wconv2", shape=[conv_size2, conv_size2, conv_shape_param, conv_dep2])
+        bconv2 = tf.get_variable("bconv2", shape=[conv_dep2])
+        # Spatial Batch Normalization Layer (,F)
+        betabatch2 = tf.get_variable("betabatch2", shape=[conv_dep2])
+        gammabatch2 = tf.get_variable("gammabatch2", shape=[conv_dep2])
+
+        # GRAPH SETUP
+        # Convolutional layer
+        conv2 = tf.nn.conv2d(batch1, Wconv2, strides=[1, 1, 1, 1], padding='SAME') + bconv2
+        # ReLU Activation
+        relu2 = tf.nn.relu(conv2)
+        relu2 = tf.nn.dropout(relu2, keep_prob)
+        # Max pooling
+        pool2 = tf.nn.max_pool(relu2, strides=[1, 2, 2, 1], padding='VALID', ksize=[1, 2, 2, 1])
+        # Spatial Batch Normalization Layer
+        meanbatch2, variancebatch2 = tf.nn.moments(pool2, axes=[0, 1, 2], keep_dims=True)
+        batch2 = tf.nn.batch_norm_with_global_normalization(t=pool2,
+                                                            m=meanbatch2,
+                                                            v=variancebatch2,
+                                                            beta=betabatch2,
+                                                            gamma=gammabatch2,
+                                                            variance_epsilon=1e-5,
+                                                            scale_after_normalization=True)
+        # Add regulerization
+        regularizers += tf.nn.l2_loss(Wconv2)
+
+        ###############################################
+        #             CONV3, 4, 5 layers              #
+        ###############################################
+        # 3x3 conv layer with 192 filters and stride of 1
+        _, _, _, conv_shape_param = batch2.shape
+        Wconv3 = tf.get_variable("Wconv3", shape=[conv_size3, conv_size3, conv_shape_param, conv_dep3])  # 192
+        bconv3 = tf.get_variable("bconv3", shape=[conv_dep3])  # 192
+        # Convolutional layer
+        conv3 = tf.nn.conv2d(batch2, Wconv3, strides=[1, 1, 1, 1], padding='SAME') + bconv3
+        # ReLU Activation
+        relu3 = tf.nn.relu(conv3)
+        relu3 = tf.nn.dropout(relu3, keep_prob)
+        # Add regulerization
+        regularizers += tf.nn.l2_loss(Wconv3)
+
+        # 3x3 conv layer with 192 filters and stride of 1
+        _, _, _, conv_shape_param = relu3.shape
+        Wconv4 = tf.get_variable("Wconv4", shape=[conv_size4, conv_size4, conv_shape_param, conv_dep4])  # 192
+        bconv4 = tf.get_variable("bconv4", shape=[conv_dep4])  # 192
+        # Convolutional layer
+        conv4 = tf.nn.conv2d(relu3, Wconv4, strides=[1, 1, 1, 1], padding='SAME') + bconv4
+        # ReLU Activation
+        relu4 = tf.nn.relu(conv4)
+        relu4 = tf.nn.dropout(relu4, keep_prob)
+        # Add regulerization
+        regularizers += tf.nn.l2_loss(Wconv4)
+
+        # 3x3 conv layer with 128 filters and stride of 1
+        _, _, _, conv_shape_param = relu4.shape
+        Wconv5 = tf.get_variable("Wconv5", shape=[conv_size5, conv_size5, conv_shape_param, conv_dep5])  # 128
+        bconv5 = tf.get_variable("bconv5", shape=[conv_dep5])  # 128
+        # Convolutional layer
+        conv5 = tf.nn.conv2d(relu4, Wconv5, strides=[1, 1, 1, 1], padding='SAME') + bconv5
+        # ReLU Activation
+        relu5 = tf.nn.relu(conv5)
+        relu5 = tf.nn.dropout(relu5, keep_prob)
+        # Max pooling
+        # pool5  = tf.nn.max_pool(relu5, strides = [1,2,2,1], padding = 'VALID', ksize = [1,2,2,1])
+        pool5 = relu5
+        # Add regulerization
+        regularizers += tf.nn.l2_loss(Wconv5)
+
         ############################################
         #           AFFINE layer                   #
         ############################################
-        pool5_flat, num_features = flatten_layer(batch1)
+        pool5_flat, num_features = flatten_layer(pool5)
         #_, H_, W_, D = batch1.get_shape()
         #pool5_flat = tf.reshape(batch1, [-1, H_ * W_ * D])
         W6 = tf.get_variable("W6", shape=[num_features, aff_size1], initializer=tf.contrib.layers.xavier_initializer())
@@ -365,22 +443,43 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         # GRAPH SETUP
         aff6 = tf.matmul(pool5_flat, W6) + b6
         # Relu Activation
-        y_out = tf.nn.relu(aff6)
+        relu6 = tf.nn.relu(aff6)
         # relu6 = tf.nn.dropout(relu6, dropout)
         # Add regulerization
         regularizers += tf.nn.l2_loss(W6)
 
+        # H*W*Dx2048 affine layer
+        _, affl_shape_param = relu6.shape
+        W7 = tf.get_variable("W7", shape=[affl_shape_param, aff_size2])
+        b7 = tf.get_variable("b7", shape=[aff_size2])
+        # GRAPH SETUP
+        aff7 = tf.matmul(relu6, W7) + b7
+        # Relu Activation
+        relu7 = tf.nn.relu(aff7)
+        relu7 = tf.nn.dropout(relu7, keep_prob)
+        # Add regulerization
+        regularizers += tf.nn.l2_loss(W7)
+
+        # H*W*Dx2048 affine layer
+        _, affl_shape_param = relu7.shape
+        W8 = tf.get_variable("W8", shape=[affl_shape_param, num_classes])
+        b8 = tf.get_variable("b8", shape=[num_classes])
+        # GRAPH SETUP
+        y_out = tf.matmul(relu7, W8) + b8
+        # Add regulerization
+        regularizers += tf.nn.l2_loss(W8)
+
         # Evaluation metrics
         prediction = tf.to_int32(tf.argmax(y_out, 1))
         correct_prediction = tf.equal(prediction, labels)
-        accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+        #accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
         #accuracy = tf.metrics.accuracy(labels, prediction)
-        #pdb.set_trace()
+
         total_loss = tf.losses.softmax_cross_entropy(tf.one_hot(labels, num_classes), logits=y_out)
         mean_loss = tf.reduce_mean(total_loss + regularizers * reg)
 
         # define our optimizer
-        global_step = tf.Variable(0, trainable=False)
+        #global_step = tf.Variable(0, trainable=False)
         #learning_rate = tf.train.exponential_decay(learning_rate, global_step, decay_steps, decay_rate, staircase=True)
         optimizer = tf.train.AdamOptimizer(learning_rate)  # select optimizer and set learning rate
         #optimizer = tf.train.AdamOptimizer(1e-6)
@@ -390,8 +489,8 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         # with tf.control_dependencies(extra_update_ops):
         #    train_step = optimizer.minimize(mean_loss)
         train_op = optimizer.minimize(mean_loss)
-
         init_op = tf.global_variables_initializer()
+
 
     with tf.Session(graph=graph) as sess:
         sess.run(init_op)
