@@ -152,7 +152,7 @@ def plot_images(sess, train_init_op, images, labels, keep_prob, mean_image):
     plt.show()
 
 
-def create_model(data_dir, num_workers, batch_size, learning_rate, validation_percentage=0.3, testing_code=False):
+def create_model(data_dir, num_workers, batch_size, learning_rate, reg, validation_percentage=0.3, testing_code=False):
 
     train_filenames, train_labels, val_filenames, val_labels, num_classes = get_data(data_dir, validation_percentage, testing_code)
 
@@ -478,6 +478,16 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         total_loss = tf.losses.softmax_cross_entropy(tf.one_hot(labels, num_classes), logits=y_out)
         mean_loss = tf.reduce_mean(total_loss + regularizers * reg)
 
+        # Saliency maps:
+        # correct_scores: the network given score for the correct label
+        def index_along_every_row(array, index):
+            N, _ = array.shape
+            return array[np.arange(N), index]
+        #correct_scores = tf.gather_nd(y_out, tf.stack((tf.range(images.shape[0]), labels), axis=1))[0]
+        correct_scores = tf.py_func(index_along_every_row, [y_out, labels], [tf.int32])[0]
+
+        grad = tf.gradients(correct_scores, [images])
+
         # define our optimizer
         #global_step = tf.Variable(0, trainable=False)
         #learning_rate = tf.train.exponential_decay(learning_rate, global_step, decay_steps, decay_rate, staircase=True)
@@ -491,7 +501,13 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
         train_op = optimizer.minimize(mean_loss)
         init_op = tf.global_variables_initializer()
 
+        saver = tf.train.Saver()
 
+        return graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver
+
+
+def train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver):
+    best_accuracy = 0
     with tf.Session(graph=graph) as sess:
         sess.run(init_op)
 
@@ -507,7 +523,7 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
             sess.run(train_init_op, {mean_image: mean_image_value})
             while True:
                 try:
-                    _, loss = sess.run([train_op, mean_loss], {keep_prob: 1, mean_image: mean_image_value})
+                    _, loss = sess.run([train_op, mean_loss], feed_dict={keep_prob: 0.8, mean_image: mean_image_value})
                 except tf.errors.OutOfRangeError:
                     break
 
@@ -517,25 +533,84 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, validation_pe
             print('Train accuracy: %f' % train_acc)
             print('Val accuracy: %f\n' % val_acc)
 
+            if val_acc>best_accuracy:
+                saver.save(sess, 'models/model.ckpt', global_step=epoch)
+
+def load_model(graph, init_op, train_init_op, images, keep_prob, mean_image):
+
+    with tf.Session(graph=graph) as sess:
+        sess.run(init_op)
+        mean_image_value = calculate_mean_image(sess, train_init_op, images, keep_prob, mean_image)
+        saver = tf.train.Saver()
+        ckpt = tf.train.get_checkpoint_state('models')
+        if ckpt and ckpt.model_checkpoint_path:
+            saver.restore(sess, ckpt.model_checkpoint_path)
+            print('Restored!')
+        else:
+            print("No Checkpoint Found")
+
+        # Check accuracy on the train and val sets every epoch.
+        train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value,
+                                   train_init_op)  # check if mean_image is ok
+        val_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, val_init_op)
+        print('Train accuracy: %f' % train_acc)
+        print('Val accuracy: %f\n' % val_acc)
+
+
+    return sess
+
+
+def saliency_map(sess, init, grad, images, labels, keep_prob, mean_image, mean_image_value):
+
+    sess.run(init, {mean_image: mean_image_value})
+    grad_value, images_value, labels_value = sess.run([grad, images, labels], feed_dict={keep_prob: 1, mean_image: mean_image_value})[0]
+    grad_value = np.absolute(grad_value)
+
+    saliency = np.max(grad_value, axis=3)
+
+    mask = random.sample(range(len(grad_value)), k=5)
+
+    for i in range(mask.size):
+        plt.subplot(2, mask.size, i + 1)
+        plt.imshow(images_value[i] + mean_image_value)
+        plt.axis('off')
+        plt.title(labels_value[i])
+        plt.subplot(2, mask.size, mask.size + i + 1)
+        plt.title(mask[i])
+        plt.imshow(saliency[i], cmap=plt.cm.hot)
+        plt.axis('off')
+        plt.gcf().set_size_inches(10, 4)
+    plt.show()
+
+
 
 
 
 if __name__ == '__main__':
+
     data_dir = "../datasets/freiburg_groceries_dataset/images"
     num_workers = 4
     batch_size = 100
 
     # Hyperparameters
-    reg = 0  # regularization
-    learning_rate = 1e-6  # learning rate
+    reg = 0.1  # regularization
+    learning_rate = 1e-4  # learning rate
     decay_rate = 0.8  # decay rate
     decay_steps = 10  # decay cut
 
-    num_epochs = 10
+    num_epochs = 2
 
-    #correct_prediction, train_op, images, labels, num_classes, train_init_op, val_init_op, graph, is_training, init_op = create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, decay_rate, validation_percentage=0.3, testing_code=True)
-    #run_model(graph, num_epochs, train_init_op, val_init_op, train_op, is_training, correct_prediction, init_op)
+    graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver = create_model(
+        data_dir, num_workers, batch_size, learning_rate, reg, validation_percentage=0.3, testing_code=True)
 
-    create_model(data_dir, num_workers, batch_size, learning_rate, validation_percentage=0.3, testing_code=True)
+    load = True
 
-    #pdb.set_trace()
+    if load:
+        load_model(graph, init_op, train_init_op, images, keep_prob, mean_image)
+
+    else:
+        #correct_prediction, train_op, images, labels, num_classes, train_init_op, val_init_op, graph, is_training, init_op = create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, decay_rate, validation_percentage=0.3, testing_code=True)
+        #run_model(graph, num_epochs, train_init_op, val_init_op, train_op, is_training, correct_prediction, init_op)
+
+        train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver)
+        #pdb.set_trace()
