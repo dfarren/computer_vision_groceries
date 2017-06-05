@@ -2,6 +2,8 @@ import tensorflow as tf
 import os
 import pdb
 import random
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -391,7 +393,6 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, reg, validati
         ###############################################
         #             CONV3, 4, 5 layers              #
         ###############################################
-        # 3x3 conv layer with 192 filters and stride of 1
         _, _, _, conv_shape_param = batch2.shape
         Wconv3 = tf.get_variable("Wconv3", shape=[conv_size3, conv_size3, conv_shape_param, conv_dep3])  # 192
         bconv3 = tf.get_variable("bconv3", shape=[conv_dep3])  # 192
@@ -530,7 +531,7 @@ def train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob,
                 saver.save(sess, 'models/model.ckpt', global_step=epoch)
 
 
-def load_model(graph, saver, train_init_op, mean_image, mean_image_value):
+def load_model(graph, train_init_op, mean_image, mean_image_value):
 
     with tf.Session(graph=graph) as sess:
         ckpt = tf.train.get_checkpoint_state('models')
@@ -540,9 +541,7 @@ def load_model(graph, saver, train_init_op, mean_image, mean_image_value):
         else:
             print("No Checkpoint Found")
 
-        # Check accuracy on the train and val sets every epoch.
-        train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value,
-                                   train_init_op)  # check if mean_image is ok
+        train_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, train_init_op)
         val_acc = check_accuracy(sess, correct_prediction, keep_prob, mean_image, mean_image_value, val_init_op)
         print('Train accuracy: %f' % train_acc)
         print('Val accuracy: %f\n' % val_acc)
@@ -595,21 +594,20 @@ if __name__ == '__main__':
     graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver, grad = create_model(
         data_dir, num_workers, batch_size, learning_rate, reg, validation_percentage=0.3, testing_code=True)
 
-    #sess = tf.Session(graph=graph)
 
     mean_image_value = calculate_mean_image(graph, train_init_op, images, keep_prob, mean_image)
 
     load = True
 
+    #sess = tf.Session(graph=graph)
     if load:
-        sess = load_model(graph, saver, train_init_op, mean_image, mean_image_value)
-        saliency_map(graph, init_op, train_init_op, grad, images, labels, keep_prob, mean_image, mean_image_value)
+        load_model(graph, train_init_op, mean_image, mean_image_value)
 
     else:
         #correct_prediction, train_op, images, labels, num_classes, train_init_op, val_init_op, graph, is_training, init_op = create_model(data_dir, num_workers, batch_size, learning_rate, decay_steps, decay_rate, validation_percentage=0.3, testing_code=True)
         #run_model(graph, num_epochs, train_init_op, val_init_op, train_op, is_training, correct_prediction, init_op)
 
-        sess = train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver)
+        train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver)
         #pdb.set_trace()
-
+    saliency_map(graph, init_op, train_init_op, grad, images, labels, keep_prob, mean_image, mean_image_value)
     #sess.close()
