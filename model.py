@@ -11,7 +11,7 @@ IMG_MEAN = [0, 0 ,0]
 IMG_SHAPE_ORIGINAL = [256, 256, 3]
 IMG_CROP_RATIO = 0.5
 IMG_SHAPE_FINAL = [int(x*IMG_CROP_RATIO) for x in IMG_SHAPE_ORIGINAL[:-1]] + [IMG_SHAPE_ORIGINAL[-1]]
-IMG_ZERO_MEAN = np.zeros(shape=IMG_SHAPE_FINAL, dtype=np.float32)
+IMG_ZERO_MEAN = np.zeros(shape=IMG_SHAPE_FINAL, dtype=np.int32)
 
 
 def list_images(directory, testing_code=False):
@@ -21,13 +21,15 @@ def list_images(directory, testing_code=False):
     labels = os.listdir(directory)
     files_and_labels = []
 
-    for label in labels:
+    for j, label in enumerate(labels):
         if label.startswith('.'):   # this is a hidden file, not a directory
             continue
         for i, f in enumerate(os.listdir(os.path.join(directory, label))):
             files_and_labels.append((os.path.join(directory, label, f), label))
-            if testing_code and i>10:
+            if testing_code and i>20:
                 break
+        if testing_code and j>5:
+            break
 
     filenames, labels = zip(*files_and_labels)
     filenames = list(filenames)
@@ -169,6 +171,7 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, reg, validati
 
         mean_image = tf.placeholder(shape = IMG_SHAPE_FINAL, dtype = tf.float32)
         keep_prob = tf.placeholder(tf.float32)  # dropout (keep probability)
+        target_y =  tf.placeholder(tf.int8) # for class visualization
 
 
 
@@ -484,7 +487,10 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, reg, validati
         # Saliency maps:
         # correct_scores: the network given score for the correct label
         correct_scores = tf.gather_nd(y_out, tf.stack((tf.range(batch_size), labels), axis=1))
-        grad = tf.gradients(correct_scores, [images])[0]
+        grad_saliency = tf.gradients(correct_scores, [images])[0]
+        # class visualization:
+        l2_reg = 1e-3 * tf.nn.l2_loss(images)
+        grad_class = tf.gradients(correct_scores - l2_reg, [images])[0]
 
         # define our optimizer
         #global_step = tf.Variable(0, trainable=False)
@@ -501,7 +507,7 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, reg, validati
 
         saver = tf.train.Saver()
 
-        return graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver, grad
+        return graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver, grad_saliency, grad_class, target_y
 
 
 def train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver):
@@ -550,23 +556,28 @@ def load_model(graph, train_init_op, mean_image, mean_image_value):
         print('Val accuracy: %f\n' % val_acc)
 
 
-def saliency_map(graph, init_weights, init_iterator, grad, images, labels, keep_prob, mean_image, mean_image_value):
+def saliency_map(graph, init_weights, init_iterator, grad_saliency, images, labels, keep_prob, mean_image, mean_image_value):
+
+    def sigmoid(x):
+        return 1 / (1 + np.exp(-10*x + 5))
 
     with tf.Session(graph=graph) as sess:
         sess.run(init_weights)
-        sess.run(init_iterator, {mean_image: IMG_ZERO_MEAN})
-        grad_value, images_value, labels_value = sess.run([grad, images, labels], feed_dict={keep_prob: 1, mean_image: IMG_ZERO_MEAN})
+        sess.run(init_iterator, {mean_image: mean_image_value})
+        grad_value, images_value, labels_value = sess.run([grad_saliency, images, labels], feed_dict={keep_prob: 1, mean_image: mean_image_value})
         #grad_value = sess.run([grad], feed_dict={keep_prob: 1, mean_image: mean_image_value})
         grad_value = np.absolute(grad_value)
 
         saliency = np.max(grad_value, axis=3)
+        mx = saliency.max()
+        saliency = sigmoid(saliency / mx)
 
         mask = random.sample(range(len(grad_value)), k=5)
         #pdb.set_trace()
 
         for i, e in enumerate(mask):
             plt.subplot(2, len(mask), i + 1)
-            plt.imshow(images_value[e] + IMG_ZERO_MEAN)
+            plt.imshow(images_value[e] + mean_image_value)
             plt.axis('off')
             plt.title(int_to_label[labels_value[e]])
             plt.subplot(2, len(mask), len(mask) + i + 1)
@@ -576,6 +587,59 @@ def saliency_map(graph, init_weights, init_iterator, grad, images, labels, keep_
             plt.gcf().set_size_inches(10, 4)
         #plt.show()
         plt.savefig('foo.png')
+
+def class_visualization(graph, init_weights, init_iterator, keep_prob, mean_image, mean_image_value, target_y, target_y_value):
+    from scipy.ndimage.filters import gaussian_filter1d
+
+    learning_rate = 25
+    num_iterations = 100
+    blur_every = 10
+    max_jitter = 16
+    show_every = 25
+
+    def blur_image(X, sigma=1):
+        X = gaussian_filter1d(X, sigma, axis=1)
+        X = gaussian_filter1d(X, sigma, axis=2)
+        return X
+
+    with tf.Session(graph=graph) as sess:
+        sess.run(init_weights)
+        sess.run(init_iterator, {mean_image: mean_image_value})
+
+        X = 255 * np.random.rand(*IMG_SHAPE_FINAL)
+        #X = preprocess_image(X)[None]
+        for t in range(100):
+            # Randomly jitter the image a bit; this gives slightly nicer results
+            ox, oy = np.random.randint(-max_jitter, max_jitter + 1, 2)
+            Xi = X.copy()
+            X = np.roll(np.roll(X, ox, 1), oy, 2)
+            try:
+                grad_val, labels_val = sess.run([grad_class, labels], feed_dict={keep_prob: 1, mean_image: mean_image_value, target_y: target_y_value})
+            except tf.errors.InvalidArgumentError:
+                break
+            pdb.set_trace()
+            for grad in grad_val[labels_val==target_y_value]:
+                X += learning_rate * grad
+
+                # Undo the jitter
+                X = np.roll(np.roll(X, -ox, 1), -oy, 2)
+
+                # As a regularizer, clip and periodically blur
+                #X = np.clip(X, -SQUEEZENET_MEAN / SQUEEZENET_STD, (1.0 - SQUEEZENET_MEAN) / SQUEEZENET_STD)
+                if t % blur_every == 0:
+                    X = blur_image(X, sigma=0.5)
+
+                # Periodically show the image
+                # if t == 0 or (t + 1) % show_every == 0 or t == num_iterations - 1:
+                #     #plt.imshow(deprocess_image(X[0]))
+                #     plt.imshow(X[0])
+                #     class_name = int_to_label[target_y_value]
+                #     plt.title('%s\nIteration %d / %d' % (class_name, t + 1, num_iterations))
+                #     plt.gcf().set_size_inches(4, 4)
+                #     plt.axis('off')
+                #     #plt.show()
+            plt.savefig('bar.png')
+        return X
 
 
 
@@ -592,15 +656,16 @@ if __name__ == '__main__':
     decay_rate = 0.8  # decay rate
     decay_steps = 10  # decay cut
 
-    num_epochs = 2
+    num_epochs = 1
 
-    graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, correct_prediction, saver, grad = create_model(
+    graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, train_op, mean_loss, \
+    correct_prediction, saver, grad_saliency, grad_class, target_y = create_model(
         data_dir, num_workers, batch_size, learning_rate, reg, validation_percentage=0.3, testing_code=True)
 
 
     mean_image_value = calculate_mean_image(graph, train_init_op, images, keep_prob, mean_image)
 
-    load = True
+    load = False
 
     #sess = tf.Session(graph=graph)
     if load:
@@ -612,5 +677,6 @@ if __name__ == '__main__':
 
         train(graph, init_op, train_init_op, val_init_op, images, labels, keep_prob, mean_image, mean_image_value, train_op, mean_loss, correct_prediction, saver)
         #pdb.set_trace()
-    saliency_map(graph, init_op, train_init_op, grad, images, labels, keep_prob, mean_image, mean_image_value)
+    saliency_map(graph, init_op, train_init_op, grad_saliency, images, labels, keep_prob, mean_image, mean_image_value)
+    class_visualization(graph, init_op, train_init_op, keep_prob, mean_image, mean_image_value, target_y, 5)
     #sess.close()
