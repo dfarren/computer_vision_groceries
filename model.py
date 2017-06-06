@@ -35,8 +35,11 @@ def list_images(directory, testing_code=False):
     unique_labels = list(set(labels))
 
     label_to_int = {}
+    global int_to_label
+    int_to_label = {}
     for i, label in enumerate(unique_labels):
         label_to_int[label] = i
+        int_to_label[i] = label
 
     labels = [label_to_int[l] for l in labels]
 
@@ -426,7 +429,7 @@ def create_model(data_dir, num_workers, batch_size, learning_rate, reg, validati
         relu5 = tf.nn.relu(conv5)
         relu5 = tf.nn.dropout(relu5, keep_prob)
         # Max pooling
-        # pool5  = tf.nn.max_pool(relu5, strides = [1,2,2,1], padding = 'VALID', ksize = [1,2,2,1])
+        #pool5  = tf.nn.max_pool(relu5, strides = [1,2,2,1], padding = 'VALID', ksize = [1,2,2,1])
         pool5 = relu5
         # Add regulerization
         regularizers += tf.nn.l2_loss(Wconv5)
@@ -565,9 +568,9 @@ def saliency_map(graph, init_weights, init_iterator, grad, images, labels, keep_
             plt.subplot(2, len(mask), i + 1)
             plt.imshow(images_value[e] + IMG_ZERO_MEAN)
             plt.axis('off')
-            plt.title(labels_value[e])
+            plt.title(int_to_label[labels_value[e]])
             plt.subplot(2, len(mask), len(mask) + i + 1)
-            plt.title(e)
+            #plt.title(e)
             plt.imshow(saliency[e], cmap=plt.cm.hot)
             plt.axis('off')
             plt.gcf().set_size_inches(10, 4)
